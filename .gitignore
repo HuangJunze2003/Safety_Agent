@@ -14,8 +14,10 @@ dist/
 build/
 
 # 1. 避开原始数据和内容（但保留文件夹）
-data_raw/raw/*
 data/*
+!data/.gitkeep
+data_raw/raw/*
+!data_raw/raw/.gitkeep
 
 # 2. 避开 LoRA 微调权重和模型文件
 models/
