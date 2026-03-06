@@ -1,0 +1,40 @@
+# Python 编译文件
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# 环境/包
+.env
+.venv
+env/
+venv/
+*.egg-info/
+dist/
+build/
+
+# 重大件：模型文件 (避开 models 文件夹和各种权重后缀)
+models/
+outputs/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+
+# 重大件：数据集文件 (避开所有数据文件夹)
+data/
+data_raw/
+raw/
+*.jsonl
+*.csv
+*.xlsx
+*.parquet
+
+# 编辑器配置
+.vscode/
+.idea/
+.DS_Store
+
+# 日志
+*.log

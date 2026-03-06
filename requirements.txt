@@ -1,0 +1,10 @@
+torch
+transformers
+python-docx
+pymupdf
+langchain
+chromadb
+pillow
+langchain-community
+sentence-transformers
+requests

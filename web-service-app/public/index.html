@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>安全生产管理智能体</title>
+    <link rel="stylesheet" href="styles.css">
+    <style>
+        body { font-family: Arial, sans-serif; background: #f5f5f5; margin: 0; padding: 20px; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1 { text-align: center; color: #333; }
+        .chat-box { height: 400px; overflow-y: auto; border: 1px solid #ddd; padding: 10px; border-radius: 4px; background: #fafafa; margin-bottom: 20px; }
+        .msg { margin-bottom: 10px; padding: 10px; border-radius: 4px; max-width: 80%; }
+        .user { background: #d0ebff; align-self: flex-end; margin-left: auto; }
+        .bot { background: #f1f3f5; border: 1px solid #eee; }
+        .msg img { max-width: 200px; display: block; margin-top: 5px; border-radius: 4px; }
+        .input-group { display: flex; gap: 10px; }
+        input[type="text"] { flex: 1; padding: 10px; border: 1px solid #ddd; border-radius: 4px; }
+        button { padding: 10px 20px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        .file-upload { display: inline-block; cursor: pointer; padding: 10px; background: #e9ecef; border-radius: 4px; border: 1px solid #ddd; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>安全生产多模态体 (Qwen-VL)</h1>
+        <div class="chat-box" id="chatBox"></div>
+        <div class="input-group">
+            <label class="file-upload">
+                <input type="file" id="imageInput" accept="image/*" style="display:none" onchange="previewImage(event)">
+                ➕ 传图
+            </label>
+            <input type="text" id="messageInput" placeholder="输入你想询问的安全问题或图片分析要求..." onkeypress="handleEnter(event)">
+            <button onclick="sendMessage()">发送</button>
+        </div>
+        <div id="previewContainer" style="margin-top: 10px; display: none;">
+            <img id="imagePreview" src="" alt="preview" style="max-height: 100px; border-radius: 4px;">
+            <button onclick="clearImage()" style="background: #dc3545; padding: 5px 10px; font-size: 12px; margin-left: 10px;">取消图片</button>
+        </div>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
