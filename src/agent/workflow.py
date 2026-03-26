@@ -34,6 +34,12 @@ class AgentConfig:
     bge_model_name: str = "BAAI/bge-small-zh-v1.5"
 
 
+class IntentType:
+    GREETING = "greeting"
+    LEGAL_ONLY = "legal_only"
+    HAZARD_ANALYSIS = "hazard_analysis"
+
+
 class SafetyProductionAgent:
     def __init__(self, config: AgentConfig | None = None) -> None:
         self.config = config or AgentConfig()
@@ -53,8 +59,14 @@ class SafetyProductionAgent:
                     "system",
                     "{system_prompt}\n\n"
                     "【意图识别与任务处理】\n"
-                    "1. 如果用户提问是关于“图片中的隐患分析”、“安全状态研判”，请结合 [相似案例检索] 和 [法条检索] 给出完整报告。\n"
-                    "2. 如果用户提问仅涉及“法律条文查询”、“通用法规解释”，请侧重使用 [法条检索] 内容进行专业解答，[相似案例检索] 仅作为参考或不展示。\n\n"
+                    "请先根据用户问题进行意图识别：\n"
+                    "- greeting: 问候、身份、能力说明。\n"
+                    "- legal_only: 仅法规咨询、条文解释、处罚依据、流程要求。\n"
+                    "- hazard_analysis: 现场隐患分析、风险研判、整改建议（特别是含图片）。\n\n"
+                    "处理规则：\n"
+                    "1) greeting -> 简短自然语言回答，不输出 JSON。\n"
+                    "2) legal_only -> 优先依据 [法条检索] 作答，不输出隐患分析 JSON。\n"
+                    "3) hazard_analysis -> 结合 [相似案例检索] 与 [法条检索] 输出结构化 JSON。\n\n"
                     "【思维链分析要求】\n"
                     "在给出最终结论前，请先在 JSON 的 \"思维链\" 字段中进行一步步推理：\n"
                     "1. 视觉分析：图中观察到了哪些具体的物理特征或作业状态？\n"
@@ -78,12 +90,10 @@ class SafetyProductionAgent:
         # 清理 image_path 并解析绝对路径
         image_abs_path = self._resolve_image_path(image_path) if image_path else None
 
-        # 意图识别逻辑：判断是否为纯法律咨询或寒暄
-        greeting_keywords = ["你是谁", "你能做", "介绍", "你好", "谁是"]
-        is_greeting = any(kw in question for kw in greeting_keywords)
-        
-        legal_keywords = ["法律", "法规", "条例", "规定", "怎么说", "条款", "依据"]
-        is_legal_only = any(kw in question for kw in legal_keywords) and ("隐患" not in question and "危险" not in question and "图片" not in question)
+        # 意图识别逻辑：统一入口，优先识别寒暄，再区分法条咨询与隐患分析
+        intent = self.detect_intent(question=question, has_image=bool(image_abs_path))
+        is_greeting = intent == IntentType.GREETING
+        is_legal_only = intent == IntentType.LEGAL_ONLY
 
         similar_cases = []
         if not is_legal_only and not is_greeting and image_abs_path:
@@ -121,9 +131,10 @@ class SafetyProductionAgent:
                     "system",
                     "{system_prompt}\n\n"
                     "【意图识别与任务处理】\n"
-                    "1. 如果用户提问是关于“图片中的隐患分析”、“安全状态研判”，请结合 [相似案例检索] 和 [法条检索] 给出完整报告。\n"
-                    "2. 如果用户提问仅涉及“法律条文查询”、“通用法规解释”，请侧重使用 [法条检索] 内容进行专业解答，不要输出隐患分析的 JSON 结构，直接以自然语言回复。\n"
-                    "3. 如果用户问“你是谁”、“你能做什么”等身份问题，请明确回答：“我是一个专业的安全生产管理专家智能体，既能回答相关法规问题，也能根据您上传的现场照片进行安全隐患排查、定性并提供合规的整改建议。”不要输出 JSON 结构。\n\n"
+                    "请先根据用户问题进行意图识别：greeting / legal_only / hazard_analysis。\n"
+                    "1) greeting：问候、身份、能力问题。请简短回答，不输出 JSON。\n"
+                    "2) legal_only：法规咨询、条文解释、处罚依据。请基于 [法条检索] 专业作答，不输出 JSON。\n"
+                    "3) hazard_analysis：隐患排查、风险研判、整改建议。若无图片则明确说明结论不确定性，再给出通用排查建议。\n\n"
                     "【思维链分析要求】（仅在需要进行隐患排查时使用）\n"
                     "在给出最终结论前，请先在 JSON 的 \"思维链\" 字段中进行一步步推理：\n"
                     "1. 视觉分析：图中观察到了哪些具体的物理特征或作业状态？\n"
@@ -190,21 +201,64 @@ class SafetyProductionAgent:
         return {
             "question": question,
             "image_path": str(image_path) if image_path else None,
+            "intent": intent,
             "similar_cases": [item.__dict__ for item in similar_cases] if similar_cases else [],
             "retrieved_laws": laws,
             "raw_answer": answer,
             "structured_output": parsed,
         }
 
-    def _resolve_image_path(self, image_path: str | Path | None) -> str:
-        if not image_path:
-            return ""
-        path = Path(image_path)
-        if not path.is_absolute():
-            path = self.project_root / path
-        return str(path.resolve())
+    def detect_intent(self, question: str, has_image: bool) -> str:
+        """Public intent classifier: LLM-first with regex fallback."""
+        llm_intent = self._detect_intent_with_llm(question=question, has_image=has_image)
+        if llm_intent in {IntentType.GREETING, IntentType.LEGAL_ONLY, IntentType.HAZARD_ANALYSIS}:
+            return llm_intent
+        return self._detect_intent(question=question, has_image=has_image)
 
-    def _chat_completion(self, messages: list[dict[str, str]]) -> str:
+    def _detect_intent_with_llm(self, question: str, has_image: bool) -> str | None:
+        system_prompt = (
+            "你是意图分类器，只做分类不做回答。"
+            "你只能输出一个 JSON 对象，格式为: "
+            '{"intent":"greeting|legal_only|hazard_analysis","confidence":0~1,"reason":"..."}'
+            "。"
+            "分类规则："
+            "greeting=问候/身份/闲聊；"
+            "legal_only=法规条文、合规解释、处罚依据；"
+            "hazard_analysis=隐患排查、风险研判、整改建议。"
+            "若有图片且语义不明确，优先 hazard_analysis。"
+            "禁止输出除 JSON 外的任何文本。"
+        )
+        user_prompt = (
+            f"问题: {question}\n"
+            f"是否有图片: {'是' if has_image else '否'}\n"
+            "请只返回 JSON。"
+        )
+        try:
+            raw = self._chat_completion(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.0,
+                max_tokens=120,
+                timeout=12,
+            )
+            parsed = self._parse_json_output(raw)
+            intent = str(parsed.get("intent", "")).strip()
+            if intent in {IntentType.GREETING, IntentType.LEGAL_ONLY, IntentType.HAZARD_ANALYSIS}:
+                return intent
+        except Exception:
+            return None
+        return None
+
+    def _chat_completion(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        temperature: float = 0.1,
+        max_tokens: int = 2048,
+        timeout: int = 300,
+    ) -> str:
         url = self.config.api_base.rstrip("/") + "/chat/completions"
         headers = {"Content-Type": "application/json"}
         if self.config.api_key:
@@ -213,12 +267,12 @@ class SafetyProductionAgent:
         body = {
             "model": self.config.model_name,
             "messages": messages,
-            "temperature": 0.1,
+            "temperature": temperature,
             "top_p": 0.8,
             "repetition_penalty": 1.1,
-            "max_tokens": 2048,
+            "max_tokens": max_tokens,
         }
-        resp = requests.post(url, headers=headers, json=body, timeout=300)
+        resp = requests.post(url, headers=headers, json=body, timeout=timeout)
         resp.raise_for_status()
         data = resp.json()
         return str(data["choices"][0]["message"].get("content", ""))
@@ -268,7 +322,49 @@ class SafetyProductionAgent:
             raise FileNotFoundError(f"未找到 system prompt: {p}")
         return p.read_text(encoding="utf-8")
 
-    def _resolve_image_path(self, image_path: str | Path) -> str:
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        return re.sub(r"\s+", "", text.lower())
+
+    def _detect_intent(self, question: str, has_image: bool) -> str:
+        q = self._normalize_text(question)
+
+        greeting_patterns = [
+            r"你好|您好|hi|hello",
+            r"你是谁|你是做什么|你能做什么|怎么用",
+            r"介绍一下|自我介绍|help|帮助",
+        ]
+        legal_patterns = [
+            r"法律|法规|条例|条款|依据|处罚|罚则|违法|合规",
+            r"是否违法|是否合法|怎么规定|如何规定|第[一二三四五六七八九十0-9]+条",
+        ]
+        hazard_patterns = [
+            r"隐患|危险|风险|违章|整改|排查|评估|研判|定级",
+            r"图片|图中|照片|现场|作业|施工|设备|防护",
+            r"看一下|帮我分析|判断一下",
+        ]
+
+        if any(re.search(p, q) for p in greeting_patterns):
+            return IntentType.GREETING
+
+        legal_hit = any(re.search(p, q) for p in legal_patterns)
+        hazard_hit = any(re.search(p, q) for p in hazard_patterns)
+
+        if has_image:
+            # 有图时优先按隐患分析路由，除非明确仅问法规且没有隐患语义。
+            if legal_hit and not hazard_hit:
+                return IntentType.LEGAL_ONLY
+            return IntentType.HAZARD_ANALYSIS
+
+        if hazard_hit and not legal_hit:
+            return IntentType.HAZARD_ANALYSIS
+        if legal_hit:
+            return IntentType.LEGAL_ONLY
+        return IntentType.HAZARD_ANALYSIS
+
+    def _resolve_image_path(self, image_path: str | Path | None) -> str:
+        if not image_path:
+            return ""
         path = Path(image_path)
         if not path.is_absolute():
             path = (self.project_root / path).resolve()

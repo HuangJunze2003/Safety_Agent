@@ -105,13 +105,35 @@ bash scripts/start_all_services.sh
 `SafetyProductionAgent` 是系统的大脑，其工作流逻辑如下：
 
 1. **多路输入**: 接收“现场图像” + “用户提问”。
-2. **意图路由**: 基于关键词过滤判断是“隐患分析”、“法律查询”还是“闲聊”。
+2. **意图路由**: 采用“LLM 优先 + 规则兜底”的三分类策略，判断为 `greeting` / `legal_only` / `hazard_analysis`。
 3. **混合检索 (Hybrid RAG)**:
    - **CLIP Retrieval**: 基于图片特征在历史案例库中寻找相似的违规照片。
    - **Chroma Retrieval**: 基于文本语义检索相关的法律条文（如《安全生产法》）。
 4. **思维链推理 (CoT)**:
    - 视觉特征提取 -> 法规契合点分析 -> 风险等级判定 -> 整改措施建议。
 5. **JSON 结构化输出**: 强制模型输出预定义格式，便于下游系统集成。
+
+### 6.1 意图识别实现位置
+- 核心文件：`src/agent/workflow.py`
+   - `detect_intent(question, has_image)`: 对外统一入口。
+   - `_detect_intent_with_llm(...)`: 调用推理服务做意图分类。
+   - `_detect_intent(...)`: 正则规则兜底分类。
+- Web 入口：`scripts/run_agent_webui.py`
+   - 在进入 `agent.analyze(...)` 之前先判意图。
+   - 仅当 `intent == hazard_analysis` 且无图片时提示上传现场图。
+
+### 6.2 当前意图分类约定
+- `greeting`: 问候、身份、能力、闲聊。
+- `legal_only`: 法规检索、条文解释、处罚依据、流程要求。
+- `hazard_analysis`: 现场隐患分析、风险研判、整改建议（尤其在有图时）。
+
+### 6.3 已知问题与优化方向
+- 已知问题：极短闲聊（如“今天天气怎么样”）在 LLM 分类失败并回退规则时，可能误分到 `hazard_analysis`。
+- 建议优化：
+   - 扩展 greeting 规则词典（天气、寒暄、口语缩写、脏词问候）。
+   - 在无图场景对短文本增加 `greeting` 优先兜底。
+   - 在 WebUI 增加 intent 调试显示，便于标注误判样本。
+   - 增加离线评测集（意图样本 JSONL）做回归测试。
 
 ---
 

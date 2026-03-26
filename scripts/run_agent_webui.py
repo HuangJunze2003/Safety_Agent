@@ -28,18 +28,13 @@ def chat_with_agent(message, history):
     """
     text_query = message.get("text", "请分析图片存在的安全隐患。")
     files = message.get("files", [])
-    
-    # 策略调整：
-    # - 纯文本法律/寒暄：直接回答
-    # - 纯文本隐患描述：允许基于文本进行分析（不强制图片）
-    legal_keywords = ["法律", "法规", "条例", "规定", "怎么说", "条款", "内容是什么", "第一条", "法", "法条", "你是谁", "你能做", "介绍", "你好"]
-    hazard_keywords = ["隐患", "风险", "违章", "安全", "事故", "整改", "危害", "危险", "违规", "防护", "坠落", "触电", "中毒", "火灾", "爆炸", "受伤"]
-    is_legal_query = any(kw in text_query for kw in legal_keywords)
-    is_hazard_text = any(kw in text_query for kw in hazard_keywords) or len(text_query) > 20
-    
-    # 仅在既无图片、又非法律/非隐患文本时提示上传
-    if not files and not is_legal_query and not is_hazard_text:
-        return "⚠️ 请上传一张需要进行安全检查的现场照片，或者描述您想咨询的安全生产隐患/法规问题。"
+
+    # 服务入口统一采用 Agent 侧意图识别，避免前后端规则不一致。
+    # 仅在识别为隐患分析且无图片时，提示用户上传现场图。
+    has_image = bool(files)
+    intent = agent.detect_intent(question=text_query, has_image=has_image)
+    if not has_image and intent == "hazard_analysis":
+        return "⚠️ 请上传一张需要进行安全检查的现场照片，或者改为咨询法规条文/通用合规问题。"
     
     # 获取图片路径（如果有的话）
     image_path = files[0] if files else None

@@ -7,6 +7,7 @@
 - **混合检索**：结合 CLIP 图像检索与 ChromaDB 法律法规检索。
 - **LoRA 微调**：集成 LLaMA-Factory 训练脚本，支持针对特定领域的微调与合并导出。
 - **全流程覆盖**：包含数据清洗、数据集构建、模型调优、RAG 检索及 Web 交互。
+- **意图识别路由**：服务入口采用“LLM 优先分类 + 规则兜底”，将请求路由为 `greeting` / `legal_only` / `hazard_analysis`。
 
 ## 📂 目录结构
 
@@ -52,6 +53,18 @@ bash scripts/train_qwen3vl_lora.sh
 # 启动 API 与 WebUI
 bash scripts/start_all_services.sh
 ```
+
+### 5. 意图识别与无图策略
+- Web 入口文件：`scripts/run_agent_webui.py`
+- 核心分类逻辑：`src/agent/workflow.py`
+- 当前策略：
+	- 先使用 LLM 对文本做三分类（`greeting` / `legal_only` / `hazard_analysis`）。
+	- 当 LLM 输出异常或无法解析时，自动回退到规则分类。
+	- 仅当 `hazard_analysis` 且用户未上传图片时，前端提示上传现场图。
+	- `greeting` 与 `legal_only` 在无图场景下允许直接回复。
+- 已知边界：
+	- 对极短闲聊（如“今天天气怎么样”）在 LLM 分类失败且规则兜底命中不足时，仍可能被误判为 `hazard_analysis`。
+	- 后续可通过补充 greeting 规则或加入分类结果调试面板持续优化。
 
 ## 📜 许可证
 本项目遵循 MIT 开源协议。
