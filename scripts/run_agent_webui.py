@@ -2,6 +2,7 @@ import gradio as gr
 import os
 import sys
 from pathlib import Path
+import requests
 
 # 将 src 目录加入环境变量以导入你的 agent
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -28,13 +29,17 @@ def chat_with_agent(message, history):
     text_query = message.get("text", "请分析图片存在的安全隐患。")
     files = message.get("files", [])
     
-    # 策略调整：如果是纯文本咨询（没有图片），且包含法律关键词或寒暄/自我介绍，则允许不传图片
+    # 策略调整：
+    # - 纯文本法律/寒暄：直接回答
+    # - 纯文本隐患描述：允许基于文本进行分析（不强制图片）
     legal_keywords = ["法律", "法规", "条例", "规定", "怎么说", "条款", "内容是什么", "第一条", "法", "法条", "你是谁", "你能做", "介绍", "你好"]
+    hazard_keywords = ["隐患", "风险", "违章", "安全", "事故", "整改", "危害", "危险", "违规", "防护", "坠落", "触电", "中毒", "火灾", "爆炸", "受伤"]
     is_legal_query = any(kw in text_query for kw in legal_keywords)
+    is_hazard_text = any(kw in text_query for kw in hazard_keywords) or len(text_query) > 20
     
-    # 如果既没有图片，也不是法律/寒暄咨询，则提示上传图片
-    if not files and not is_legal_query:
-        return "⚠️ 请上传一张需要进行安全检查的现场照片，或者输入您想咨询的安全生产法律法规问题。"
+    # 仅在既无图片、又非法律/非隐患文本时提示上传
+    if not files and not is_legal_query and not is_hazard_text:
+        return "⚠️ 请上传一张需要进行安全检查的现场照片，或者描述您想咨询的安全生产隐患/法规问题。"
     
     # 获取图片路径（如果有的话）
     image_path = files[0] if files else None
@@ -126,15 +131,182 @@ def chat_with_agent(message, history):
     except Exception as e:
         return f"发生运行时错误: {str(e)}"
 
-# 构建 Gradio 多模态交互界面
-demo = gr.ChatInterface(
-    fn=chat_with_agent,
-    multimodal=True,
-    title="👷 安全生产管理智能体 (Qwen-VL Agent)",
-    description="请上传现场监控截图或工作环境照片，并输入查询问题，智能体将连接安全法规知识库为您进行多模态检索与违章分析。",
-    theme=gr.themes.Soft()
-)
+def upload_library_file(file, lib_type):
+    """
+    通过 Gradio 界面上传文件到知识库
+    """
+    if file is None:
+        return "请先选择需要上传的文件。"
+    
+    file_path = file.name
+    import requests
+    try:
+        url = "http://127.0.0.1:8001/upload"
+        files = {'file': open(file_path, 'rb')}
+        data = {'lib_type': "laws" if lib_type == "法律法规库" else "hazards"}
+        
+        response = requests.post(url, files=files, data=data)
+        if response.status_code == 200:
+            return response.json().get("message", "上传并处理成功！")
+        else:
+            return f"上传失败: {response.text}"
+    except Exception as e:
+        return f"发生错误: {str(e)}"
+
+
+API_BASE = "http://127.0.0.1:8001"
+
+
+def kb_fetch(lib_type):
+    try:
+        resp = requests.get(f"{API_BASE}/kb", params={"lib_type": lib_type})
+        if resp.status_code != 200:
+            return [], f"查询失败: {resp.text}"
+        cases = resp.json().get("cases", [])
+        # 只展示关键信息，使用 list-of-lists 适配 gr.Dataframe
+        simplified: list[list[str]] = []
+        for c in cases:
+            simplified.append([
+                c.get("id", ""),
+                c.get("source_file", ""),
+                (c.get("legal_basis", c.get("issue_text", "")) or "")[:200],
+            ])
+        return simplified, "查询成功"
+    except Exception as e:
+        return [], f"请求出错: {e}"
+
+
+def kb_create(lib_type, content, source_file):
+    if not content:
+        return [], "内容不能为空"
+    try:
+        resp = requests.post(f"{API_BASE}/kb/create", json={
+            "lib_type": lib_type,
+            "content": content,
+            "source_file": source_file or "manual",
+        })
+        if resp.status_code != 200:
+            return [], f"新增失败: {resp.text}"
+        return kb_fetch(lib_type)
+    except Exception as e:
+        return [], f"请求出错: {e}"
+
+
+def kb_update(lib_type, case_id, content, source_file):
+    if not case_id or not content:
+        return [], "ID 和内容均不能为空"
+    try:
+        resp = requests.post(f"{API_BASE}/kb/update", json={
+            "lib_type": lib_type,
+            "case_id": case_id,
+            "content": content,
+            "source_file": source_file or None,
+        })
+        if resp.status_code != 200:
+            return [], f"更新失败: {resp.text}"
+        return kb_fetch(lib_type)
+    except Exception as e:
+        return [], f"请求出错: {e}"
+
+
+def kb_delete(lib_type, case_id):
+    if not case_id:
+        return [], "ID 不能为空"
+    try:
+        resp = requests.post(f"{API_BASE}/kb/delete", json={"case_id": case_id})
+        if resp.status_code != 200:
+            return [], f"删除失败: {resp.text}"
+        return kb_fetch(lib_type)
+    except Exception as e:
+        return [], f"请求出错: {e}"
+
+# 构建界面
+CHAT_CSS = """
+:root { --page-padding: 12px; }
+body { margin: 0; }
+.gradio-container { max-width: 100% !important; padding: var(--page-padding) !important; min-height: 100vh; }
+.chat-panel { display: flex; flex-direction: column; gap: 12px; min-height: calc(100vh - 140px); }
+.chat-panel .chatbot { flex: 1 1 auto; min-height: 60vh; }
+.chat-panel .message-row { width: 100% !important; }
+.chat-panel textarea { min-height: 140px; }
+"""
+
+with gr.Blocks(theme=gr.themes.Soft(), css=CHAT_CSS) as demo:
+    gr.Markdown("# 👷 安全生产管理智能体 (Qwen-VL Agent)")
+    
+    with gr.Tab("智能对话与检测"):
+        with gr.Column(elem_classes=["chat-panel"]):
+            gr.ChatInterface(
+                fn=chat_with_agent,
+                multimodal=True,
+                description="请上传现场监控截图或工作环境照片，并输入查询问题，智能体将为您进行多模态检索与违章分析。",
+                fill_height=True, # 启用填充高度以实现自适应
+            )
+    
+    with gr.Tab("知识库录入"):
+        gr.Markdown("### 📥 上传新资料到系统数据库")
+        with gr.Row():
+            # 放宽前端文件类型限制，避免浏览器误判；后台仍会按支持的类型解析
+            file_input = gr.File(
+                label="选择文件 (建议 PDF/Word/TXT)",
+                file_types=None,
+            )
+            lib_type = gr.Radio(["法律法规库", "安全隐患库"], label="目标知识库", value="法律法规库")
+        
+        upload_button = gr.Button("🚀 上传并开始分析/入库")
+        output_txt = gr.Textbox(label="操作状态")
+        
+        upload_button.click(
+            fn=upload_library_file,
+            inputs=[file_input, lib_type],
+            outputs=output_txt
+        )
+
+    with gr.Tab("知识库管理"):
+        gr.Markdown("### 📚 查看 / 增删改 知识库条目")
+        lib_select = gr.Dropdown(["laws", "hazards"], value="laws", label="库类型 (laws=法律法规, hazards=安全隐患)")
+        kb_table = gr.Dataframe(headers=["id", "source_file", "legal_basis"], interactive=False)
+        status_box = gr.Textbox(label="操作状态", interactive=False)
+
+        with gr.Row():
+            refresh_btn = gr.Button("🔄 刷新列表")
+            del_id = gr.Textbox(label="删除/更新用 ID", lines=1)
+            del_btn = gr.Button("🗑️ 删除")
+        with gr.Row():
+            new_content = gr.Textbox(label="内容 (法律条文或隐患描述)", lines=4)
+            new_source = gr.Textbox(label="来源文件", value="manual")
+        with gr.Row():
+            create_btn = gr.Button("➕ 新增")
+            update_btn = gr.Button("✏️ 更新")
+
+        def _wrap_fetch(lib_type):
+            data, msg = kb_fetch(lib_type)
+            return data, msg
+
+        refresh_btn.click(_wrap_fetch, inputs=lib_select, outputs=[kb_table, status_box])
+
+        create_btn.click(
+            lambda lt, c, s: kb_create(lt, c, s),
+            inputs=[lib_select, new_content, new_source],
+            outputs=[kb_table, status_box],
+        )
+
+        update_btn.click(
+            lambda lt, cid, c, s: kb_update(lt, cid, c, s),
+            inputs=[lib_select, del_id, new_content, new_source],
+            outputs=[kb_table, status_box],
+        )
+
+        del_btn.click(
+            lambda lt, cid: kb_delete(lt, cid),
+            inputs=[lib_select, del_id],
+            outputs=[kb_table, status_box],
+        )
+
+        # 首次加载自动刷新
+        demo.load(_wrap_fetch, inputs=lib_select, outputs=[kb_table, status_box])
 
 if __name__ == "__main__":
     # 启动网页前端
     demo.launch(server_name="0.0.0.0", server_port=7860, share=False)
+

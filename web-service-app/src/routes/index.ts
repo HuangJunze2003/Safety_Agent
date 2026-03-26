@@ -1,38 +1,47 @@
 import express from 'express';
 import axios from 'axios';
+import multer from 'multer';
+import FormData from 'form-data';
+import fs from 'fs';
 
 const router = express.Router();
+const upload = multer({ dest: 'uploads/' });
 
 export function setRoutes(app: express.Express) {
     app.use('/', router);
 
     router.post('/api/chat', async (req, res) => {
+        // ... (existing chat route)
+    });
+
+    router.post('/api/upload', upload.single('file'), async (req, res) => {
         try {
-            const { message, imageBase64 } = req.body;
-            let content: any[] = [];
-            
-            if (imageBase64) {
-                content.push({ type: "image_url", image_url: { url: imageBase64 } });
-            }
-            if (message) {
-                content.push({ type: "text", text: message });
-            } else {
-                content.push({ type: "text", text: "请分析这张图" });
+            const { libType } = req.body;
+            const file = req.file;
+
+            if (!file) {
+                return res.status(400).json({ error: 'No file uploaded' });
             }
 
-            const payload = {
-                model: "qwen2-vl",
-                messages: [{ role: "user", content }],
-                max_tokens: 1024,
-                temperature: 0.1
-            };
+            // 转发给 Python 处理 API (8001端口)
+            const formData = new FormData();
+            formData.append('file', fs.createReadStream(file.path), file.originalname);
+            formData.append('lib_type', libType);
 
-            const response = await axios.post('http://127.0.0.1:8000/v1/chat/completions', payload);
-            const reply = response.data.choices[0].message.content;
-            res.json({ reply });
+            const response = await axios.post('http://127.0.0.1:8001/upload', formData, {
+                headers: {
+                    ...formData.getHeaders(),
+                },
+            });
+
+            // 清理本地临时文件
+            fs.unlinkSync(file.path);
+
+            res.json(response.data);
         } catch (error: any) {
-            console.error("API call error:", error?.message);
-            res.status(500).json({ error: error?.message || "Service error" });
+            console.error("Upload error:", error?.message);
+            res.status(500).json({ error: error?.message || "Internal server error" });
         }
     });
 }
+
