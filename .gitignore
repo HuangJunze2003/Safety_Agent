@@ -32,6 +32,9 @@ outputs/
 .vscode/
 .idea/
 .DS_Store
+.cache/
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
 
 # 日志
 *.log

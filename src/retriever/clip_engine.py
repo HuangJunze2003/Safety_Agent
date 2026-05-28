@@ -48,7 +48,13 @@ class CLIPCaseEngine:
         self.images_dir.mkdir(parents=True, exist_ok=True)
         self.db_path.mkdir(parents=True, exist_ok=True)
 
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        env_device = os.getenv("CLIP_DEVICE", "").strip()
+        if device:
+            self.device = device
+        elif env_device:
+            self.device = env_device
+        else:
+            self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model = None
         self.processor = None
         self.use_histogram_fallback = os.getenv("HF_HUB_OFFLINE") == "1" or os.getenv("TRANSFORMERS_OFFLINE") == "1"

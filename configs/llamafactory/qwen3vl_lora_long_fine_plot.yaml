@@ -1,0 +1,52 @@
+### 长训 + 尽量密的损失曲线 + 早停（按 eval_loss，连续若干次验证无提升则停止）
+### 说明：当前 SFT 语料条数很少时，仅靠 4 epoch 优化步数不多；提高 num_train_epochs 作为上限，早停可提前结束。
+### eval_steps 较小以便验证曲线更密；save_steps 取为 eval_steps 的整数倍（满足 load_best_model_at_end），并 save_only_model 减轻磁盘占用。
+### 输出与主实验目录分开，避免覆盖 outputs/qwen3vl_lora_local。
+
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_target: q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj
+lora_rank: 64
+lora_alpha: 128
+lora_dropout: 0.05
+
+model_name_or_path: /root/autodl-tmp/Safety_Agent/models/base-vl
+template: qwen2_vl
+
+dataset_dir: /root/autodl-tmp/Safety_Agent/data/data_processed
+dataset: safety_qwen3vl_sft_cleaned_image
+max_samples: 100000
+cutoff_len: 2048
+overwrite_cache: true
+preprocessing_num_workers: 8
+
+output_dir: /root/autodl-tmp/Safety_Agent/outputs/qwen3vl_lora_long_fine
+logging_steps: 1
+save_steps: 48
+save_total_limit: 3
+save_only_model: true
+plot_loss: true
+overwrite_output_dir: true
+
+load_best_model_at_end: true
+metric_for_best_model: eval_loss
+greater_is_better: false
+early_stopping_patience: 6
+early_stopping_threshold: 0.0
+
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 0.00005
+num_train_epochs: 48.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.03
+bf16: true
+gradient_checkpointing: true
+
+val_size: 0.1
+per_device_eval_batch_size: 1
+eval_strategy: steps
+eval_steps: 4
+
+freeze_vision_tower: false

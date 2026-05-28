@@ -1,4 +1,4 @@
-### LLaMA-Factory LoRA config for Qwen 3.0-VL (local model path)
+### 与 qwen3vl_lora_local.yaml 同参的完整训练（绝对路径，便于单独传一个 yaml 给 llamafactory-cli）
 
 stage: sft
 do_train: true
@@ -8,25 +8,22 @@ lora_rank: 64
 lora_alpha: 128
 lora_dropout: 0.05
 
-model_name_or_path: ./models/base-vl
+model_name_or_path: /root/autodl-tmp/Safety_Agent/models/base-vl
 template: qwen2_vl
 
-### dataset
-dataset_dir: data/data_processed
+dataset_dir: /root/autodl-tmp/Safety_Agent/data/data_processed
 dataset: safety_qwen3vl_sft_cleaned_image
 max_samples: 100000
 cutoff_len: 2048
 overwrite_cache: true
 preprocessing_num_workers: 8
 
-### output
-output_dir: outputs/qwen3vl_lora_local
+output_dir: /root/autodl-tmp/Safety_Agent/outputs/qwen3vl_lora_local
 logging_steps: 1
 save_steps: 50
 plot_loss: true
 overwrite_output_dir: true
 
-### train
 per_device_train_batch_size: 1
 gradient_accumulation_steps: 8
 learning_rate: 0.00005
@@ -36,11 +33,9 @@ warmup_ratio: 0.03
 bf16: true
 gradient_checkpointing: true
 
-### eval
 val_size: 0.1
 per_device_eval_batch_size: 1
 eval_strategy: steps
 eval_steps: 50
 
-### multimodal
 freeze_vision_tower: false

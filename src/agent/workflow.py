@@ -14,17 +14,11 @@ from langchain_core.documents import Document
 
 from retriever.clip_engine import CLIPCaseEngine
 
-try:
-    from langchain_core.prompts import ChatPromptTemplate
-except Exception as exc:  # pragma: no cover
-    raise RuntimeError("缺少 langchain-core，请先安装 langchain。") from exc
-
-
 @dataclass
 class AgentConfig:
     system_prompt_path: str | Path = "prompts/system_role_prompt.txt"
     api_base: str = "http://127.0.0.1:8000/v1"
-    model_name: str = "qwen3vl_lora_local"
+    model_name: str = "qwen3vl_lora_long_fine"
     api_key: str = ""
     project_root: str | Path = "."
     top_k: int = 3
@@ -53,38 +47,17 @@ class SafetyProductionAgent:
         )
         self.system_prompt = self._load_system_prompt(self.config.system_prompt_path)
 
-        self.prompt = ChatPromptTemplate.from_messages(
-            [
-                (
-                    "system",
-                    "{system_prompt}\n\n"
-                    "【意图识别与任务处理】\n"
-                    "请先根据用户问题进行意图识别：\n"
-                    "- greeting: 问候、身份、能力说明。\n"
-                    "- legal_only: 仅法规咨询、条文解释、处罚依据、流程要求。\n"
-                    "- hazard_analysis: 现场隐患分析、风险研判、整改建议（特别是含图片）。\n\n"
-                    "处理规则：\n"
-                    "1) greeting -> 简短自然语言回答，不输出 JSON。\n"
-                    "2) legal_only -> 优先依据 [法条检索] 作答，不输出隐患分析 JSON。\n"
-                    "3) hazard_analysis -> 结合 [相似案例检索] 与 [法条检索] 输出结构化 JSON。\n\n"
-                    "【思维链分析要求】\n"
-                    "在给出最终结论前，请先在 JSON 的 \"思维链\" 字段中进行一步步推理：\n"
-                    "1. 视觉分析：图中观察到了哪些具体的物理特征或作业状态？\n"
-                    "2. 法规匹配：这些特征对应了检索到的哪些法律条款？\n"
-                    "3. 风险判定：结合图像证据和法条，确定隐患的严重程度。\n"
-                    "4. 措施建议：基于隐患原因，提出针对性的技术与管理建议。\n\n"
-                    "你必须严格输出 JSON 对象，且包含如下键：\n"
-                    "思维链, 隐患定性, 法律依据, 整改措施, 参考案例。\n"
-                    "其中 法律依据/整改措施/参考案例 必须是数组。"
-                    "\n\n[相似案例检索]\n{retrieved_cases}"
-                    "\n\n[法条检索]\n{retrieved_laws}",
-                ),
-                (
-                    "user",
-                    "<image>\n用户问题：{question}\n图像路径：{image_path}\n请基于图片与检索上下文给出结构化结论。",
-                ),
-            ]
-        )
+    _HAZARD_JSON_INSTRUCTION = (
+        "【思维链分析要求】\n"
+        "在给出最终结论前，请先在 JSON 的 \"思维链\" 字段中进行一步步推理：\n"
+        "1. 视觉分析：图中观察到了哪些具体的物理特征或作业状态？\n"
+        "2. 法规匹配：这些特征对应了检索到的哪些法律条款？\n"
+        "3. 风险判定：结合图像证据和法条，确定隐患的严重程度。\n"
+        "4. 措施建议：基于隐患原因，提出针对性的技术与管理建议。\n\n"
+        "你必须严格输出 JSON 对象，且包含如下键：\n"
+        "思维链, 隐患定性, 法律依据, 整改措施, 参考案例。\n"
+        "其中 法律依据/整改措施/参考案例 必须是数组。"
+    )
 
     def analyze(self, image_path: str | Path | None, question: str = "请分析该现场隐患") -> dict[str, Any]:
         # 清理 image_path 并解析绝对路径
@@ -106,96 +79,43 @@ class SafetyProductionAgent:
         # 法律库根据是否为闲聊稍微调控 depth
         legal_top_k = 0 if is_greeting else (self.config.legal_top_k * 2 if is_legal_only else self.config.legal_top_k)
         
-        laws = []
+        laws: list[dict[str, Any]] = []
         if legal_top_k > 0:
-            laws = self.legal_retriever.search(
-                query=question,
-                top_k=legal_top_k,
-            )
+            if is_legal_only:
+                laws = self._retrieve_laws_for_legal_query(question, legal_top_k)
+            else:
+                laws = self.legal_retriever.search(query=question, top_k=legal_top_k)
+
+        prompt_laws = (
+            self._select_laws_for_prompt(question, laws, legal_top_k)
+            if is_legal_only
+            else laws
+        )
 
         retrieved_cases = self._format_similar_cases(similar_cases)
-        retrieved_laws = self._format_laws(laws)
+        retrieved_laws = self._format_laws(prompt_laws)
 
-        # 构造 prompt 参数
-        prompt_kwargs = {
-            "system_prompt": self.system_prompt,
-            "retrieved_cases": retrieved_cases,
-            "retrieved_laws": retrieved_laws,
-            "question": question,
-        }
-
-        if not image_abs_path:
-            # 纯文本模式构造
-            messages = [
-                (
-                    "system",
-                    "{system_prompt}\n\n"
-                    "【意图识别与任务处理】\n"
-                    "请先根据用户问题进行意图识别：greeting / legal_only / hazard_analysis。\n"
-                    "1) greeting：问候、身份、能力问题。请简短回答，不输出 JSON。\n"
-                    "2) legal_only：法规咨询、条文解释、处罚依据。请基于 [法条检索] 专业作答，不输出 JSON。\n"
-                    "3) hazard_analysis：隐患排查、风险研判、整改建议。若无图片则明确说明结论不确定性，再给出通用排查建议。\n\n"
-                    "【思维链分析要求】（仅在需要进行隐患排查时使用）\n"
-                    "在给出最终结论前，请先在 JSON 的 \"思维链\" 字段中进行一步步推理：\n"
-                    "1. 视觉分析：图中观察到了哪些具体的物理特征或作业状态？\n"
-                    "2. 法规匹配：这些特征对应了检索到的哪些法律条款？\n"
-                    "3. 风险判定：结合图像证据和法条，确定隐患的严重程度。\n"
-                    "4. 措施建议：基于隐患原因，提出针对性的技术与管理建议。\n\n"
-                    "如果是隐患排查，你必须严格输出 JSON 对象，包含如下键：\n"
-                    "思维链, 隐患定性, 法律依据, 整改措施, 参考案例。\n"
-                    "其中 法律依据/整改措施/参考案例 必须是数组。"
-                    "\n\n[相似案例检索]\n{retrieved_cases}"
-                    "\n\n[法条检索]\n{retrieved_laws}",
-                ),
-                (
-                    "user",
-                    "用户问题：{question}\n请基于检索上下文给出专业解答。如果涉及法律条文，请直接引用检索到的内容。",
-                ),
-            ]
-            
-            # 手动格式化 LangChain Message
-            payload_messages = []
-            for role, template in messages:
-                content = template.format(**prompt_kwargs)
-                payload_messages.append({"role": self._to_openai_role(role), "content": content})
-
-        else:
-            # 含有图片的模式构造
-            prompt_kwargs["image_path"] = image_abs_path
-            formatted_messages = self.prompt.format_messages(**prompt_kwargs)
-            payload_messages = []
-            for message in formatted_messages:
-                role = self._to_openai_role(message.type)
-                if role == "user":
-                    with open(image_abs_path, "rb") as image_file:
-                        encoded_string = base64.b64encode(image_file.read()).decode("utf-8")
-                        base64_image = f"data:image/jpeg;base64,{encoded_string}"
-                    payload_messages.append(
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": str(message.content),
-                                },
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": base64_image,
-                                    },
-                                },
-                            ],
-                        }
-                    )
-                else:
-                    payload_messages.append(
-                        {
-                            "role": role,
-                            "content": str(message.content),
-                        }
-                    )
+        system_content = self._build_system_instruction(
+            intent=intent,
+            retrieved_cases=retrieved_cases,
+            retrieved_laws=retrieved_laws,
+        )
+        user_content = self._build_user_instruction(
+            intent=intent,
+            question=question,
+            image_path=image_abs_path,
+        )
+        payload_messages = self._build_payload_messages(
+            system_content=system_content,
+            user_content=user_content,
+            image_abs_path=image_abs_path,
+        )
 
         answer = self._chat_completion(payload_messages)
+        if intent == IntentType.GREETING and self._is_meta_intent_only(answer):
+            answer = self._default_greeting_reply()
+        if is_legal_only and self._should_replace_legal_answer(question, answer):
+            answer = self._build_legal_structured_answer(question, laws)
 
         parsed = self._parse_json_output(answer)
         return {
@@ -207,6 +127,116 @@ class SafetyProductionAgent:
             "raw_answer": answer,
             "structured_output": parsed,
         }
+
+    def _build_system_instruction(
+        self,
+        intent: str,
+        retrieved_cases: str,
+        retrieved_laws: str,
+    ) -> str:
+        base = self.system_prompt.strip()
+        if intent == IntentType.GREETING:
+            return (
+                f"{base}\n\n"
+                "【当前任务】系统已判定本轮为 greeting（问候/身份/能力咨询）。\n"
+                "请用简短、自然的普通话直接回答用户，说明你是安全生产管理智能助手，"
+                "可协助法规咨询与现场隐患分析。\n"
+                "严禁输出 JSON、严禁输出 intent 字段、严禁进行隐患结构化分析。"
+            )
+        if intent == IntentType.LEGAL_ONLY:
+            return (
+                f"{base}\n\n"
+                "【当前任务】系统已判定本轮为 legal_only（法规咨询）。\n"
+                "你必须针对用户问题作答，优先综合下方 [法条检索] 中与问题关键词（如动火、审批、流程）"
+                "直接相关的条目，按以下结构用 Markdown 输出：\n"
+                "0) **思维链**（必须放在最前，分 4-6 步写清：问题理解→检索筛选→条款比对→结论推导；"
+                "可逐步引用 [法条检索] 编号）；\n"
+                "1) **结论概述**（2-4 句）；\n"
+                "2) **审批/管理流程要点**（分条，每条条目注明法规名称与条款号）；\n"
+                "3) **关于用户点名的法规**（若检索未命中《安全生产法》/《消防法》动火审批专条，"
+                "须如实说明并引用已命中的下位法、条例或行业规定）；\n"
+                "4) **法规依据摘录**（引用检索原文，禁止只贴一条无关条款）。\n"
+                "禁止：只复述一条与问题无关的法条、忽略检索列表前部更相关的内容、"
+                "输出隐患分析 JSON、输出 intent 字段。\n"
+                f"\n\n[法条检索]\n{retrieved_laws}"
+            )
+        return (
+            f"{base}\n\n"
+            "【当前任务】系统已判定本轮为 hazard_analysis（现场隐患分析）。\n"
+            f"{self._HAZARD_JSON_INSTRUCTION}\n"
+            f"\n\n[相似案例检索]\n{retrieved_cases}"
+            f"\n\n[法条检索]\n{retrieved_laws}"
+        )
+
+    def _build_user_instruction(
+        self,
+        intent: str,
+        question: str,
+        image_path: str | None,
+    ) -> str:
+        if image_path:
+            return (
+                f"用户问题：{question}\n"
+                f"图像路径：{image_path}\n"
+                "请结合图片与检索上下文给出结论。"
+            )
+        if intent == IntentType.GREETING:
+            return f"用户问题：{question}"
+        if intent == IntentType.LEGAL_ONLY:
+            return (
+                f"用户问题：{question}\n"
+                "请先输出 **思维链**（分步推理），再按系统要求的其余章节作答；"
+                "必须覆盖审批/许可/票证、现场措施与验收等要点，"
+                "并优先引用 [法条检索] 中含“动火”“审批”“明火”等关键词的条款。"
+            )
+        return (
+            f"用户问题：{question}\n"
+            "当前无现场图片，请先说明结论存在不确定性，再给出通用排查与整改建议。"
+        )
+
+    def _build_payload_messages(
+        self,
+        system_content: str,
+        user_content: str,
+        image_abs_path: str | None,
+    ) -> list[dict[str, Any]]:
+        payload: list[dict[str, Any]] = [
+            {"role": "system", "content": system_content},
+        ]
+        if not image_abs_path:
+            payload.append({"role": "user", "content": user_content})
+            return payload
+
+        with open(image_abs_path, "rb") as image_file:
+            encoded_string = base64.b64encode(image_file.read()).decode("utf-8")
+        base64_image = f"data:image/jpeg;base64,{encoded_string}"
+        payload.append(
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": user_content},
+                    {"type": "image_url", "image_url": {"url": base64_image}},
+                ],
+            }
+        )
+        return payload
+
+    @staticmethod
+    def _is_meta_intent_only(text: str) -> bool:
+        parsed = SafetyProductionAgent._parse_json_output(text)
+        if not parsed:
+            return False
+        allowed = {"intent", "confidence", "reason"}
+        keys = set(parsed.keys())
+        return keys.issubset(allowed) and "intent" in keys
+
+    @staticmethod
+    def _default_greeting_reply() -> str:
+        return (
+            "您好！我是安全生产管理智能体，面向法规咨询与现场隐患分析场景。"
+            "您可以向我咨询安全生产法律法规，或上传现场照片让我结合历史案例与法条"
+            "给出隐患研判与整改建议参考。"
+        )
 
     def detect_intent(self, question: str, has_image: bool) -> str:
         """Public intent classifier: LLM-first with regex fallback."""
@@ -272,10 +302,269 @@ class SafetyProductionAgent:
             "repetition_penalty": 1.1,
             "max_tokens": max_tokens,
         }
-        resp = requests.post(url, headers=headers, json=body, timeout=timeout)
+        try:
+            resp = requests.post(url, headers=headers, json=body, timeout=(15, timeout))
+        except requests.exceptions.ConnectionError as exc:
+            raise RuntimeError(
+                f"无法连接模型服务 {self.config.api_base}，请先启动 scripts/start_lf_api.sh "
+                f"或 bash scripts/start_all_services.sh"
+            ) from exc
+        except requests.exceptions.Timeout as exc:
+            raise RuntimeError("模型服务响应超时，请稍后重试或检查 GPU 显存。") from exc
         resp.raise_for_status()
         data = resp.json()
         return str(data["choices"][0]["message"].get("content", ""))
+
+    def _retrieve_laws_for_legal_query(self, question: str, top_k: int) -> list[dict[str, Any]]:
+        fetch_k = max(top_k * 3, 12)
+        expanded = self._expand_legal_query(question)
+        primary = self.legal_retriever.search(query=question, top_k=fetch_k)
+        extra: list[dict[str, Any]] = []
+        if expanded != question:
+            extra = self.legal_retriever.search(query=expanded, top_k=fetch_k)
+        merged = self._merge_legal_hits(primary + extra)
+        return self._rerank_legal_hits(question, merged)[:top_k]
+
+    @staticmethod
+    def _expand_legal_query(question: str) -> str:
+        extras: list[str] = []
+        if re.search(r"动火", question):
+            extras.extend(["动火作业", "动火作业票", "审批", "专项安全技术措施"])
+        if re.search(r"消防", question):
+            extras.extend(["明火作业", "消防条例", "消防安全管理人批准"])
+        if re.search(r"安全生产法", question):
+            extras.extend(["危险作业", "安全生产法"])
+        if not extras:
+            return question
+        return f"{question} {' '.join(extras)}"
+
+    @staticmethod
+    def _merge_legal_hits(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        seen: set[tuple[str, str]] = set()
+        merged: list[dict[str, Any]] = []
+        for item in items:
+            basis = str(item.get("legal_basis", ""))
+            key = (str(item.get("source_file", "")), basis[:120])
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+        return merged
+
+    @staticmethod
+    def _legal_query_terms(question: str) -> list[str]:
+        normalized = re.sub(r"\s+", "", question)
+        tokens = re.findall(r"[\u4e00-\u9fa5]{2,}|[A-Za-z]+|\d+", normalized)
+        stop = {
+            "什么",
+            "如何",
+            "怎么",
+            "哪些",
+            "是否",
+            "有没有",
+            "要求",
+            "规定",
+            "流程",
+            "相关",
+            "法律法规",
+            "法规",
+            "法律",
+        }
+        return [t for t in tokens if t not in stop]
+
+    def _rerank_legal_hits(self, question: str, laws: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        terms = self._legal_query_terms(question)
+        focus = [t for t in ("动火", "动火作业", "审批", "明火", "作业票") if t in question]
+        scored: list[tuple[float, dict[str, Any]]] = []
+        for law in laws:
+            text = f"{law.get('source_file', '')}{law.get('legal_basis', '')}"
+            kw_score = float(sum(2 for t in terms if t in text))
+            if focus and any(t in text for t in focus):
+                kw_score += 8.0
+            if "安全生产法" in question and "安全生产法" in text:
+                kw_score += 4.0
+            if "消防" in question and "消防" in text:
+                kw_score += 3.0
+            if not self._is_regulation_source(str(law.get("source_file", ""))):
+                kw_score -= 6.0
+            emb = float(law.get("score", 1.0))
+            scored.append((kw_score * 10.0 - emb, law))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [law for _, law in scored]
+
+    @staticmethod
+    def _select_laws_for_prompt(
+        question: str,
+        laws: list[dict[str, Any]],
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        core_keywords = [k for k in ("动火", "动火作业", "审批", "明火", "作业票") if k in question]
+        if not core_keywords:
+            return laws[:limit]
+        regulation_first = [
+            law
+            for law in laws
+            if SafetyProductionAgent._is_regulation_source(str(law.get("source_file", "")))
+        ]
+        pool = regulation_first or laws
+        relevant = [
+            law
+            for law in pool
+            if any(k in str(law.get("legal_basis", "")) for k in core_keywords)
+        ]
+        others = [law for law in pool if law not in relevant]
+        pool = relevant + others
+        return pool[:limit]
+
+    @staticmethod
+    def _should_replace_legal_answer(question: str, answer: str) -> bool:
+        q = SafetyProductionAgent._normalize_text(question)
+        a = SafetyProductionAgent._normalize_text(answer)
+        if len(answer.strip()) < 120:
+            return True
+        if "动火" in q and "动火" not in a:
+            return True
+        if ("审批" in q or "流程" in q) and "审批" not in a and "流程" not in a and "票" not in a:
+            return True
+        if "动火" in q and ("消防设计文件" in answer or "消防设计" in answer):
+            return True
+        return False
+
+    @staticmethod
+    def _extract_article_label(content: str) -> str:
+        match = re.search(r"第[一二三四五六七八九十百零\d]+条", content)
+        return match.group(0) if match else ""
+
+    @staticmethod
+    def _is_regulation_source(source_file: str) -> bool:
+        source = str(source_file)
+        if any(marker in source for marker in ("报告", "案卷", "检查表", "评估报告", "复查")):
+            return False
+        return any(marker in source for marker in ("法", "条例", "规定", "办法", "标准", "规范", "通知"))
+
+    def _build_legal_thought_chain(
+        self, question: str, laws: list[dict[str, Any]], relevant: list[dict[str, Any]]
+    ) -> str:
+        q = question.strip()
+        named = []
+        if "安全生产法" in q:
+            named.append("《安全生产法》")
+        if "消防" in q:
+            named.append("消防法规")
+        named_text = "、".join(named) if named else "相关安全生产与消防法规"
+
+        top_sources: list[str] = []
+        for law in relevant[:4]:
+            src = str(law.get("source_file", "")).replace(".docx", "").replace(".pdf", "")
+            article = self._extract_article_label(str(law.get("legal_basis", "")))
+            label = f"{src}{article}" if article else src
+            if label and label not in top_sources:
+                top_sources.append(label)
+
+        steps = [
+            f"1. **问题理解**：用户询问「{q}」，核心关注 {named_text} 中对作业许可/审批程序的要求。",
+            (
+                "2. **检索筛选**：在 [法条检索] 中优先保留含“动火/明火/审批/作业票”等关键词的条目，"
+                f"共命中 {len(relevant)} 条高度相关法规片段，"
+                + (f"主要包括：{'；'.join(top_sources)}。" if top_sources else "需结合场景补充检索。")
+            ),
+            (
+                "3. **条款比对**：将检索结果按效力层级比对——上位法确立危险作业/用火管理原则，"
+                "下位条例与行业规定细化动火票、现场勘查、审批签字与验收留痕等程序。"
+            ),
+            "4. **结论推导**：综合可引用条款归纳审批流程要点；对检索未直接命中的法规须如实说明，并引用已命中的替代依据。",
+        ]
+        return "\n".join(steps)
+
+    def _build_legal_structured_answer(self, question: str, laws: list[dict[str, Any]]) -> str:
+        regulation_laws = [
+            law for law in laws if self._is_regulation_source(str(law.get("source_file", "")))
+        ]
+        law_pool = regulation_laws or laws
+        relevant = [
+            law
+            for law in law_pool
+            if any(k in str(law.get("legal_basis", "")) for k in ("动火", "明火", "动火作业票"))
+        ]
+        thought = self._build_legal_thought_chain(question, laws, relevant)
+        lines = [
+            "### 📋 法规咨询答复",
+            "",
+            f"**您的问题**：{question.strip()}",
+            "",
+            "**思维链**",
+            thought,
+            "",
+            "**结论概述**",
+            "动火作业属于火灾爆炸风险较高的特殊作业，应落实作业许可（动火票）制度："
+            "作业前勘查并编制专项安全技术措施、按程序分级审批，作业中监护与隔离，作业后验收留痕。",
+            "具体审批主体与票证样式以行业规定、地方性法规和本单位制度为准。",
+            "",
+            "**审批与管理流程要点**（据本轮检索归纳）",
+        ]
+
+        step_lines: list[str] = []
+        for law in relevant[:8]:
+            content = str(law.get("legal_basis", "")).strip()
+            source = str(law.get("source_file", "未知文件")).replace(".docx", "").replace(".pdf", "")
+            article = self._extract_article_label(content)
+            label = f"{source}{article}" if article else source
+            for sent in re.split(r"[。；\n]", content):
+                sent = sent.strip()
+                if not sent:
+                    continue
+                if any(k in sent for k in ("审批", "批准", "动火作业票", "勘查", "验收", "监护", "票")):
+                    step_lines.append(f"- **{label}**：{sent}。")
+        if not step_lines:
+            for law in relevant[:4]:
+                source = str(law.get("source_file", "未知文件"))
+                snippet = str(law.get("legal_basis", "")).strip()
+                if len(snippet) > 220:
+                    snippet = snippet[:220] + "…"
+                step_lines.append(f"- **{source}**：{snippet}")
+        lines.extend(step_lines[:10] or ["- 本轮检索未命中可直接引用的动火审批条款，请补充行业与场景信息后重试。"])
+
+        lines.extend(["", "**关于您点名的《安全生产法》/消防法规**"])
+        has_work_safety = any("安全生产法" in str(law.get("source_file", "")) for law in law_pool)
+        fire_on_topic = [
+            law
+            for law in law_pool
+            if "消防" in str(law.get("source_file", ""))
+            and any(k in str(law.get("legal_basis", "")) for k in ("动火", "明火", "焊接"))
+        ]
+        if "安全生产法" in question and not has_work_safety:
+            lines.append(
+                "- 本轮检索**未召回到**《安全生产法》中直接写明“动火作业审批票证”的专条；"
+                "上位法通常将动火纳入**危险作业**统一管理，审批细节由配套规章、行业标准及企业制度细化。"
+            )
+        if "消防" in question:
+            if not fire_on_topic:
+                lines.append(
+                    "- 《消防法》对建设工程消防设计审查规定较多，对现场**动火票证**着墨较少；"
+                    "动火审批更常见地体现在**消防条例**（如地方条例中的明火作业批准）及行业安全管理规定中。"
+                )
+            else:
+                for law in fire_on_topic[:2]:
+                    source = str(law.get("source_file", ""))
+                    article = self._extract_article_label(str(law.get("legal_basis", "")))
+                    snippet = str(law.get("legal_basis", "")).strip()
+                    if len(snippet) > 280:
+                        snippet = snippet[:280] + "…"
+                    lines.append(f"- **{source}{article}**：{snippet}")
+
+        lines.extend(["", "**法规依据摘录**"])
+        for idx, law in enumerate(relevant[:5], start=1):
+            source = str(law.get("source_file", "未知文件"))
+            snippet = str(law.get("legal_basis", "")).strip()
+            if len(snippet) > 360:
+                snippet = snippet[:360] + "…"
+            lines.append(f"{idx}. **{source}**\n   {snippet}")
+
+        lines.append(
+            "\n> 说明：以上内容由系统根据向量检索结果自动归纳；"
+            "若需适用于特定行业（矿山、化工、建筑施工等），请补充场景以便匹配专门规定。"
+        )
+        return "\n".join(lines)
 
     @staticmethod
     def _format_similar_cases(items: list[Any]) -> str:
@@ -569,7 +858,7 @@ def build_agent_from_env() -> SafetyProductionAgent:
     cfg = AgentConfig(
         system_prompt_path=os.getenv("SYSTEM_PROMPT_PATH", "prompts/system_role_prompt.txt"),
         api_base=os.getenv("QWEN_API_BASE", "http://127.0.0.1:8000/v1"),
-        model_name=os.getenv("QWEN_MODEL_NAME", "qwen3vl_lora_local"),
+        model_name=os.getenv("QWEN_MODEL_NAME", "qwen3vl_lora_long_fine"),
         api_key=os.getenv("QWEN_API_KEY", ""),
         top_k=int(os.getenv("RETRIEVE_TOP_K", "3")),
     )

@@ -4,7 +4,7 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-MODEL_ID="${MODEL_ID:-Qwen/Qwen2-VL-7B-Instruct}"
+MODEL_ID="${MODEL_ID:-Qwen/Qwen3.0-VL-8B-Instruct}"
 MODELSCOPE_MODEL_ID="${MODELSCOPE_MODEL_ID:-$MODEL_ID}"
 MODEL_DIR="${MODEL_DIR:-$PROJECT_ROOT/models/base-vl}"
 HF_CACHE_DIR="$PROJECT_ROOT/.cache/huggingface"

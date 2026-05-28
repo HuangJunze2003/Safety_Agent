@@ -11,6 +11,24 @@ export HF_ENDPOINT="https://hf-mirror.com"
 export HF_HOME="/root/autodl-tmp/huggingface_cache"
 export PYTHONPATH="$PROJECT_ROOT/src:${PYTHONPATH:-}"
 
+# 推理权重（Base + LoRA）；可改为 outputs/qwen3vl_lora_loss_curve_run 等
+export BASE_MODEL_PATH="${BASE_MODEL_PATH:-$PROJECT_ROOT/models/base-vl}"
+export ADAPTER_PATH="${ADAPTER_PATH:-$PROJECT_ROOT/outputs/qwen3vl_lora_long_fine}"
+export MODEL_PATH="${MODEL_PATH:-$PROJECT_ROOT/outputs/qwen2vl_lora_merged}"
+export INFER_MODE="${INFER_MODE:-merged}"
+export QWEN_MODEL_NAME="${QWEN_MODEL_NAME:-qwen3vl_lora_merged}"
+export QWEN_API_BASE="${QWEN_API_BASE:-http://127.0.0.1:8000/v1}"
+# 检索模型放 CPU，为推理 API 留出 GPU 显存
+export CLIP_DEVICE="${CLIP_DEVICE:-cpu}"
+
+# 统一锁定到 llama conda 环境的 Python，避免随当前 shell 漂移
+LLAMA_PYTHON="${LLAMA_PYTHON:-/root/miniconda3/envs/llama/bin/python}"
+if [ ! -x "$LLAMA_PYTHON" ]; then
+    echo "[ERROR] 未找到 llama 环境的 Python 解释器: $LLAMA_PYTHON" >&2
+    echo "[ERROR] 请确认 conda 环境 'llama' 已正确创建。" >&2
+    exit 1
+fi
+
 # 用于保证关闭脚本时，能杀掉同时启动的两个子进程
 cleanup() {
     echo ""
@@ -24,6 +42,13 @@ cleanup() {
 # 捕获 Ctrl+C 的发出的中断信号，如果捕捉到则执行 cleanup 清理函数
 trap cleanup SIGINT SIGTERM
 
+# 清理占用 8000 的僵死推理进程（常见于 LoRA merge OOM 后端口未释放）
+if command -v fuser >/dev/null 2>&1; then
+    fuser -k 8000/tcp >/dev/null 2>&1 || true
+fi
+pkill -f "llamafactory-cli api" >/dev/null 2>&1 || true
+sleep 2
+
 # =========================================================================
 # 步骤 1： 启动后端大语言模型 API 服务 (Qwen-VL Inference Backend)
 # =========================================================================
@@ -35,13 +60,24 @@ API_PID=$!
 # 步骤 2： 启动数据入库与文档解析 API 服务 (Ingestion Service)
 # =========================================================================
 echo "[启动阶段 2/3] 正在拉起数据入库与文档解析 API 服务 (Port 8001)..."
-python scripts/run_ingestion_api.py &
+"$LLAMA_PYTHON" scripts/run_ingestion_api.py &
 INGEST_PID=$!
 
-echo "[INFO] 等待 API 接口预热启动 (约 10-15 秒)........."
-# 等待15s确信服务启动
-sleep 15
-echo "[INFO] 如果上方出现了 Uvicorn running on http://127.0.0.1:8000 说明模型就绪。"
+echo "[INFO] 等待模型 API 就绪（最多约 3 分钟）..."
+API_READY=false
+for _ in $(seq 1 90); do
+    if curl -sf --max-time 3 "http://127.0.0.1:8000/v1/models" >/dev/null 2>&1; then
+        API_READY=true
+        break
+    fi
+    sleep 2
+done
+if [ "$API_READY" != true ]; then
+    echo "[ERROR] 模型 API (8000) 未就绪。请检查上方是否出现 CUDA OOM 或 llamafactory-cli 报错。" >&2
+    echo "[ERROR] 可尝试: export INFER_MODE=merged && bash scripts/start_lf_api.sh" >&2
+    exit 1
+fi
+echo "[INFO] 模型 API 已就绪: http://127.0.0.1:8000"
 echo "[INFO] 数据处理接口运行在 http://127.0.0.1:8001。"
 
 # =========================================================================
@@ -49,7 +85,7 @@ echo "[INFO] 数据处理接口运行在 http://127.0.0.1:8001。"
 # =========================================================================
 echo ""
 echo "[启动阶段 3/3] 正在拉起 Agent WebUI 前端与智能体大脑..."
-/root/miniconda3/envs/llama/bin/python scripts/run_agent_webui.py &
+"$LLAMA_PYTHON" scripts/run_agent_webui.py &
 WEBUI_PID=$!
 
 echo ""

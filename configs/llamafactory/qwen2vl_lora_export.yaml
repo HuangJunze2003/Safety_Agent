@@ -2,11 +2,11 @@
 
 stage: sft
 model_name_or_path: ./models/base-vl
-adapter_name_or_path: ./outputs/qwen3vl_lora_local
+adapter_name_or_path: ./outputs/qwen3vl_lora_long_fine
 template: qwen2_vl
 finetuning_type: lora
 
-export_dir: ./outputs/qwen2vl_lora_merged
+export_dir: ./outputs/qwen3vl_lora_long_fine_merged
 export_size: 2
 export_device: cpu
 export_legacy_format: false
