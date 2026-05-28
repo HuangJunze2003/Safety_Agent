@@ -27,6 +27,7 @@ outputs/
 *.pt
 *.pth
 *.ckpt
+docs/
 
 # 编辑器配置
 .vscode/
